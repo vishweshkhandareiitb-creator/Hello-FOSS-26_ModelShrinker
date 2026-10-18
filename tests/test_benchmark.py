@@ -13,7 +13,17 @@ def test_compare_report():
     small = compress(model, "l1_pruning", ratio=0.5)
     report = compare(model, small, X, val_loader=make_loader((3, 32, 32)), runs=5, warmup=1, verbose=False)
     a, b = report["original"], report["compressed"]
-    assert set(a) == {"params", "nonzero_params", "size_mb", "latency_ms", "flops", "accuracy"}
+    assert set(a) == {
+        "params",
+        "nonzero_params",
+        "size_mb",
+        "weights_mb",
+        "activations_mb",
+        "peak_memory_mb",
+        "latency_ms",
+        "flops",
+        "accuracy",
+    }
     assert b["params"] < a["params"]
     assert b["size_mb"] < a["size_mb"]
     assert b["flops"] < a["flops"]

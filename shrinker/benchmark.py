@@ -98,6 +98,57 @@ def count_flops(model: nn.Module, example_input: Any) -> int:
     return 2 * total[0]
 
 
+def estimate_memory(model: nn.Module, example_input: Any, device: str = "cpu") -> Dict[str, float]:
+    """estimate weights, activations, and peak memory in mb."""
+    x = _to(example_input, device)
+    cuda = torch.device(device).type == "cuda"
+    
+    # calculate weights memory taking element size and quantization types into account
+    weights_bytes = sum(p.nelement() * p.element_size() for p in model.parameters())
+    weights_bytes += sum(b.nelement() * b.element_size() for b in model.buffers())
+    weights_mb = weights_bytes / 1e6
+
+    activation_bytes = [0]
+
+    def hook_fn(m, inp, out):
+        if isinstance(out, torch.Tensor):
+            activation_bytes[0] += out.nelement() * out.element_size()
+        elif isinstance(out, (tuple, list)):
+            for o in out:
+                if isinstance(o, torch.Tensor):
+                    activation_bytes[0] += o.nelement() * o.element_size()
+
+    handles = []
+    for m in model.modules():
+        if list(m.children()):
+            continue
+        handles.append(m.register_forward_hook(hook_fn))
+
+    try:
+        if cuda:
+            torch.cuda.reset_peak_memory_stats(device)
+            torch.cuda.synchronize()
+
+        with _eval_on(model, device), torch.no_grad():
+            _run(model, x)
+
+        if cuda:
+            torch.cuda.synchronize()
+            peak_bytes = torch.cuda.max_memory_allocated(device)
+        else:
+            # estimate peak memory on cpu as model weights plus activation memory
+            peak_bytes = weights_bytes + activation_bytes[0]
+    finally:
+        for h in handles:
+            h.remove()
+
+    return {
+        "weights_mb": weights_mb,
+        "activations_mb": activation_bytes[0] / 1e6,
+        "peak_memory_mb": peak_bytes / 1e6,
+    }
+
+
 def evaluate(model: nn.Module, loader, device: str = "cpu") -> float:
     """Top-1 accuracy (0..1)."""
     correct = total = 0
@@ -116,10 +167,20 @@ def measure(
         flops = count_flops(model, example_input)
     except Exception:  # noqa: BLE001
         flops = None
+
+    try:
+        memory = estimate_memory(model, example_input, device)
+    except Exception:  # noqa: BLE001
+        sz = model_size_mb(model)
+        memory = {"weights_mb": sz, "activations_mb": 0.0, "peak_memory_mb": sz}
+
     return {
         "params": count_parameters(model),
         "nonzero_params": count_nonzero_parameters(model),
         "size_mb": model_size_mb(model),
+        "weights_mb": memory["weights_mb"],
+        "activations_mb": memory["activations_mb"],
+        "peak_memory_mb": memory["peak_memory_mb"],
         "latency_ms": measure_latency(model, example_input, warmup, runs, device),
         "flops": flops,
         "accuracy": evaluate(model, val_loader, device) if val_loader is not None else None,
@@ -157,6 +218,9 @@ def format_report(report: Dict[str, Dict[str, Optional[float]]]) -> str:
         rows.append(("non-zero params", f"{a['nonzero_params']:,}", f"{b['nonzero_params']:,}",
                      pct(a["nonzero_params"], b["nonzero_params"])))
     rows.append(("size (MB)", f"{a['size_mb']:.3f}", f"{b['size_mb']:.3f}", pct(a["size_mb"], b["size_mb"])))
+    rows.append(("weights (MB)", f"{a['weights_mb']:.3f}", f"{b['weights_mb']:.3f}", pct(a["weights_mb"], b["weights_mb"])))
+    rows.append(("activations (MB)", f"{a['activations_mb']:.3f}", f"{b['activations_mb']:.3f}", pct(a["activations_mb"], b["activations_mb"])))
+    rows.append(("peak memory (MB)", f"{a['peak_memory_mb']:.3f}", f"{b['peak_memory_mb']:.3f}", pct(a["peak_memory_mb"], b["peak_memory_mb"])))
     speedup = a["latency_ms"] / b["latency_ms"] if b["latency_ms"] else float("inf")
     rows.append(("latency (ms)", f"{a['latency_ms']:.3f}", f"{b['latency_ms']:.3f}", f"{speedup:.2f}x speed"))
     if a["flops"] is not None and b["flops"] is not None:

@@ -161,7 +161,7 @@ def evaluate(model: nn.Module, loader, device: str = "cpu") -> float:
 
 
 def measure(
-    model: nn.Module, example_input: Any, val_loader=None, device: str = "cpu", warmup: int = 10, runs: int = 50
+    model: nn.Module, example_input=None, val_loader=None, device: str = "cpu", warmup: int = 10, runs: int = 50
 ) -> Dict[str, Optional[float]]:
     try:
         flops = count_flops(model, example_input)
@@ -169,7 +169,7 @@ def measure(
         flops = None
 
     try:
-        memory = estimate_memory(model, example_input, device)
+        memory = estimate_memory(model, example_input, device) if example_input is not None else {"weights_mb": model_size_mb(model), "activations_mb": 0.0, "peak_memory_mb": model_size_mb(model)}
     except Exception:  # noqa: BLE001
         sz = model_size_mb(model)
         memory = {"weights_mb": sz, "activations_mb": 0.0, "peak_memory_mb": sz}
@@ -181,7 +181,7 @@ def measure(
         "weights_mb": memory["weights_mb"],
         "activations_mb": memory["activations_mb"],
         "peak_memory_mb": memory["peak_memory_mb"],
-        "latency_ms": measure_latency(model, example_input, warmup, runs, device),
+        "latency_ms": measure_latency(model, example_input, warmup, runs, device) if example_input is not None else None,
         "flops": flops,
         "accuracy": evaluate(model, val_loader, device) if val_loader is not None else None,
     }
@@ -221,8 +221,9 @@ def format_report(report: Dict[str, Dict[str, Optional[float]]]) -> str:
     rows.append(("weights (MB)", f"{a['weights_mb']:.3f}", f"{b['weights_mb']:.3f}", pct(a["weights_mb"], b["weights_mb"])))
     rows.append(("activations (MB)", f"{a['activations_mb']:.3f}", f"{b['activations_mb']:.3f}", pct(a["activations_mb"], b["activations_mb"])))
     rows.append(("peak memory (MB)", f"{a['peak_memory_mb']:.3f}", f"{b['peak_memory_mb']:.3f}", pct(a["peak_memory_mb"], b["peak_memory_mb"])))
-    speedup = a["latency_ms"] / b["latency_ms"] if b["latency_ms"] else float("inf")
-    rows.append(("latency (ms)", f"{a['latency_ms']:.3f}", f"{b['latency_ms']:.3f}", f"{speedup:.2f}x speed"))
+    if a["latency_ms"] is not None and b["latency_ms"] is not None:
+        speedup = a["latency_ms"] / b["latency_ms"] if b["latency_ms"] else float("inf")
+        rows.append(("latency (ms)", f"{a['latency_ms']:.3f}", f"{b['latency_ms']:.3f}", f"{speedup:.2f}x speed"))
     if a["flops"] is not None and b["flops"] is not None:
         rows.append(("MFLOPs", f"{a['flops'] / 1e6:.2f}", f"{b['flops'] / 1e6:.2f}", pct(a["flops"], b["flops"])))
     if a["accuracy"] is not None:

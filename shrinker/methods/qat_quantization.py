@@ -15,6 +15,59 @@ from shrinker.registry import register
 logger = logging.getLogger(__name__)
 
 
+def _patch_quantized_modules() -> None:
+    """Patch PyTorch's quantized module classes so unpickling restores all missing Module dicts."""
+    try:
+        import torch.ao.nn.quantized as nnq
+        import torch.ao.nn.intrinsic.quantized as nniq
+
+        classes = set()
+        for mod in (nnq, nniq):
+            for attr in dir(mod):
+                try:
+                    cls = getattr(mod, attr)
+                    if isinstance(cls, type) and issubclass(cls, torch.nn.Module):
+                        classes.add(cls)
+                except Exception:
+                    pass
+
+        for cls in classes:
+            orig_setstate = getattr(cls, "__setstate__", None)
+            if orig_setstate and not getattr(orig_setstate, "_is_patched", False):
+                def _make_setstate(old_fn):
+                    def __setstate__(self, state):
+                        old_fn(self, state)
+                        for attr in (
+                            "_modules",
+                            "_parameters",
+                            "_buffers",
+                            "_backward_hooks",
+                            "_backward_pre_hooks",
+                            "_forward_hooks",
+                            "_forward_pre_hooks",
+                            "_forward_hooks_with_kwargs",
+                            "_forward_hooks_always_called",
+                            "_state_dict_hooks",
+                            "_state_dict_pre_hooks",
+                            "_load_state_dict_pre_hooks",
+                            "_load_state_dict_post_hooks",
+                            "_non_persistent_buffers_set",
+                        ):
+                            if attr not in self.__dict__:
+                                if attr == "_non_persistent_buffers_set":
+                                    self.__dict__[attr] = set()
+                                else:
+                                    self.__dict__[attr] = {}
+                    __setstate__._is_patched = True
+                    return __setstate__
+                cls.__setstate__ = _make_setstate(orig_setstate)
+    except Exception:
+        pass
+
+
+_patch_quantized_modules()
+
+
 def _as_args(inputs: Any) -> Tuple[Any, ...]:
     return inputs if isinstance(inputs, tuple) else (inputs,)
 
@@ -97,14 +150,14 @@ def apply(
 
     The method prepares the copied model for FX graph-mode quantization-aware
     training, fine-tunes it with cross-entropy, and converts supported graph
-    operations to backend-specific integer operators.  Fake quantization in
+    operations to backend-specific integer operators. Fake quantization in
     training simulates signed per-channel INT8 weights and asymmetric INT8
     activations while preserving FP32 weights for optimization.
 
-    ``loader`` yields ``(inputs, class_labels)`` batches.  ``example_input``
+    ``loader`` yields ``(inputs, class_labels)`` batches. ``example_input``
     supplies the input shape used to trace the graph; the first loader batch is
-    used when it is omitted.  ``backend='auto'`` selects an available x86 CPU
-    backend on desktop machines and QNNPACK on ARM.  Operations unsupported by
+    used when it is omitted. ``backend='auto'`` selects an available x86 CPU
+    backend on desktop machines and QNNPACK on ARM. Operations unsupported by
     the selected backend remain FP32 with quantization boundaries around them.
     """
     if loader is None:

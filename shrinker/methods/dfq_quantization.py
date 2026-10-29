@@ -29,6 +29,59 @@ from shrinker.utils import get_module, replace_module
 
 logger = logging.getLogger(__name__)
 
+
+def _patch_quantized_modules() -> None:
+    """Patch PyTorch's quantized module classes so unpickling restores all missing Module dicts."""
+    try:
+        import torch.ao.nn.quantized as nnq
+        import torch.ao.nn.intrinsic.quantized as nniq
+
+        classes = set()
+        for mod in (nnq, nniq):
+            for attr in dir(mod):
+                try:
+                    cls = getattr(mod, attr)
+                    if isinstance(cls, type) and issubclass(cls, torch.nn.Module):
+                        classes.add(cls)
+                except Exception:
+                    pass
+
+        for cls in classes:
+            orig_setstate = getattr(cls, "__setstate__", None)
+            if orig_setstate and not getattr(orig_setstate, "_is_patched", False):
+                def _make_setstate(old_fn):
+                    def __setstate__(self, state):
+                        old_fn(self, state)
+                        for attr in (
+                            "_modules",
+                            "_parameters",
+                            "_buffers",
+                            "_backward_hooks",
+                            "_backward_pre_hooks",
+                            "_forward_hooks",
+                            "_forward_pre_hooks",
+                            "_forward_hooks_with_kwargs",
+                            "_forward_hooks_always_called",
+                            "_state_dict_hooks",
+                            "_state_dict_pre_hooks",
+                            "_load_state_dict_pre_hooks",
+                            "_load_state_dict_post_hooks",
+                            "_non_persistent_buffers_set",
+                        ):
+                            if attr not in self.__dict__:
+                                if attr == "_non_persistent_buffers_set":
+                                    self.__dict__[attr] = set()
+                                else:
+                                    self.__dict__[attr] = {}
+                    __setstate__._is_patched = True
+                    return __setstate__
+                cls.__setstate__ = _make_setstate(orig_setstate)
+    except Exception:
+        pass
+
+
+_patch_quantized_modules()
+
 _AFFINE_TYPES: Tuple[Type[nn.Module], ...] = (nn.Conv2d, nn.Linear)
 _BATCHNORM_TYPES: Tuple[Type[nn.Module], ...] = (nn.BatchNorm1d, nn.BatchNorm2d)
 
@@ -281,6 +334,22 @@ class _QuantizedConv2d(nn.Module):
         quantized = torch.quantize_per_tensor(x.contiguous(), self.input_scale, self.input_zero_point, torch.quint8)
         return self.kernel(quantized).dequantize()
 
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if hasattr(self, "kernel"):
+            for attr in (
+                "_modules", "_parameters", "_buffers", "_backward_hooks",
+                "_backward_pre_hooks", "_forward_hooks", "_forward_pre_hooks",
+                "_forward_hooks_with_kwargs", "_forward_hooks_always_called",
+                "_state_dict_hooks", "_state_dict_pre_hooks", "_load_state_dict_pre_hooks",
+                "_load_state_dict_post_hooks", "_non_persistent_buffers_set"
+            ):
+                if attr not in self.kernel.__dict__:
+                    if attr == "_non_persistent_buffers_set":
+                        self.kernel.__dict__[attr] = set()
+                    else:
+                        self.kernel.__dict__[attr] = {}
+
 
 class _QuantizedLinear(nn.Module):
     """Float-boundary wrapper around a static, per-tensor INT8 Linear kernel."""
@@ -299,6 +368,22 @@ class _QuantizedLinear(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         quantized = torch.quantize_per_tensor(x.contiguous(), self.input_scale, self.input_zero_point, torch.quint8)
         return self.kernel(quantized).dequantize()
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if hasattr(self, "kernel"):
+            for attr in (
+                "_modules", "_parameters", "_buffers", "_backward_hooks",
+                "_backward_pre_hooks", "_forward_hooks", "_forward_pre_hooks",
+                "_forward_hooks_with_kwargs", "_forward_hooks_always_called",
+                "_state_dict_hooks", "_state_dict_pre_hooks", "_load_state_dict_pre_hooks",
+                "_load_state_dict_post_hooks", "_non_persistent_buffers_set"
+            ):
+                if attr not in self.kernel.__dict__:
+                    if attr == "_non_persistent_buffers_set":
+                        self.kernel.__dict__[attr] = set()
+                    else:
+                        self.kernel.__dict__[attr] = {}
 
 
 def _bias_correct(layer: nn.Module, expected_input: Tensor) -> None:
